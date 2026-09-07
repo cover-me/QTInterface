@@ -11,7 +11,7 @@ Automatic log in WORD
 
 <img width="200" alt="log_word" src="https://github.com/user-attachments/assets/a245ffb8-5676-453d-ae3b-0acc255c9cd5" />
 
-Scaler and affine transformer as virtual instruments, used for unit converting, virtual gates, and group gates (matrix becomes singular, example \[\[1,0,0\],\[1,1,0\],\[1,1,1\]\])
+Scaler and affine transformer as virtual instruments, used for unit converting, virtual gates, and group gates.
 
 <img width="200" alt="scaler and affine transformer" src="https://github.com/user-attachments/assets/e44a0467-d68e-4ed9-97e7-0dbd2eddb1af" />
 
