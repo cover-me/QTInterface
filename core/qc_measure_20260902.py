@@ -9,12 +9,14 @@ from tqdm import tqdm
 import win32com.client as win32
 from shutil import copyfile, rmtree
 from tempfile import mkdtemp
+from pathlib import Path
+from contextlib import contextmanager, nullcontext 
 
 import qcodes as qc
 from qcodes.dataset.sqlite.database import initialise_or_create_database_at
 from qcodes.dataset.experiment_container import load_or_create_experiment
 from qcodes.dataset.measurements import Measurement
-from qcodes.instrument.parameter import Parameter
+from qcodes.parameters import Parameter, ManualParameter
 from qcodes.dataset.threading import process_params_meas
 
 def print_versions():
@@ -28,17 +30,52 @@ def print_versions():
     print('scipy:', scipy.__version__)
     print('pandas:', pd.__version__)
 
-def DummyParameter(name, unit):
-    return Parameter(name=name, unit=unit, label='Dummy Parameter', set_cmd=None, get_cmd=None, initial_value=0)
-    
+# def DummyParameter(name, unit):
+    # return Parameter(name=name, unit=unit, label='Dummy Parameter', set_cmd=None, get_cmd=None, initial_value=0)
+
+class Progress:
+    def __init__(self, iterable, disable=False):
+        self._it = iter(iterable)
+        self.total = len(iterable)
+        self.n = 0
+        self.start = time.perf_counter()
+        self._last_print = 0
+        self._disable = disable
+
+    def __iter__(self):
+        return self
+
+    def __next__(self):
+        try:
+            val = next(self._it)
+            self.n += 1
+            return val
+        except StopIteration:
+            raise
+
+    def _render(self):
+        if not self._disable:
+            p = self.n / self.total
+            bar_w = 25
+            fill = int(p * bar_w)
+            bar = "█" * fill + "-" * (bar_w - fill)
+            elapsed = time.perf_counter() - self.start
+            eta = (elapsed / p - elapsed)/60 if p else '-- min'
+            return f"|{bar}| {p*100:5.1f}% {eta:.2f} min"
+        else:
+            return ''
 
 class QMeasure:
 
-    def __init__(self, exp_name, sample_name, export_dat=True, mute_qclient=False):
+    def __init__(self, exp_name, sample_name, export_dat=True, mute_qclient=False, station_manager=None):
+
         self.exp_name = exp_name
         self.sample_name = sample_name
         self.export_dat = export_dat
         self.mute_qclient = mute_qclient
+        self._shared_scan_status = 'Idle'
+        self.station_manager = station_manager
+        self.quasi_lock = station_manager.quasi_lock
       
         # x fast axis, y slow axis, for 2d scan
         self.scan_para = {'x':{},'y':{}}
@@ -46,25 +83,24 @@ class QMeasure:
         self.monitor_para = {}
         self.meas_name_para = {}
         
-        self.set_scan_parameter('x', para=None, start=None, stop=None, points=None, delay=0)
-        self.set_scan_parameter('y', para=None, start=None, stop=None, points=None, delay=0)
+        self.set_scan_para('x', para=None, start=None, stop=None, points=1, delay=0)
+        self.set_scan_para('y', para=None, start=None, stop=None, points=1, delay=0)
         
         self.counter = 0
         
-    def set_scan_parameter(self, axis='x', para=None, start=None, stop=None, points=None, delay=0):
-        if para is None:
-            setpoints = np.array([0])
-            p = DummyParameter(name=f'dummy_{axis}', unit='')
-        else:
-            setpoints = np.linspace(start, stop, points)
-            p = para
+     
+    def set_scan_para(self, axis='x', para=None, start=None, stop=None, points=None, delay=0):
+        if not para:
+            para = ManualParameter(name=f'{axis}_index')
+            start, stop = 0, int(points)-1
+        setpoints = np.linspace(start, stop, points)
         if axis == 'y' and len(setpoints)>1:
             self.scan_dim = 2
-            
+
         self.scan_para[axis]['setpoints'] = setpoints
-        self.scan_para[axis]['parameter'] = p
+        self.scan_para[axis]['parameter'] = para
         self.scan_para[axis]['delay'] = delay
-        
+                
     def set_parameters_to_aquire(self, para_list=[], parallel=True):
         self.monitor_para['list'] = para_list
         self.monitor_para['parallel'] = parallel
@@ -75,7 +111,13 @@ class QMeasure:
     def generate_measurement_name(self, bwd=False, scan_direction='up'):
         # scan info x axis
         para = self.scan_para['x']['parameter']
-        label = f'{para.name} ({para.unit})' if para.unit else f'{para.name}'
+        if self.station_manager:
+            para_name = self.station_manager._get_para_guimeta(para, 'name')
+            if not para_name:
+                para_name = para.name
+        else:
+            para_name = para.name
+        label = f'{para_name} ({para.unit})' if para.unit else f'{para_name}'
         setpoints = self.scan_para['x']['setpoints']
         delay = self.scan_para['x']['delay']
         direction = '->' if scan_direction=='up' else '<-'
@@ -91,11 +133,14 @@ class QMeasure:
             meas_name += f'Y: {label}, {setpoints[0]} {direction} {setpoints[-1]}, pts: {len(setpoints)}, dly: {delay}\n'
 
         para_list = self.meas_name_para
-        meas_name += 'Note: ['
-        for para in para_list:
-            label = f'{para.name} ({para.unit})' if para.unit else f'{para.name}'
-            meas_name += f'{label}: {para()}, '
-        meas_name = f'{meas_name[:-2]}], '
+        
+        if para_list:
+            meas_name += 'Note: ['
+            for para in para_list:
+                label = f'{para.name} ({para.unit})' if para.unit else f'{para.name}'
+                meas_name += f'{label}: {para()}, '
+            meas_name = f'{meas_name[:-2]}], '
+
         para_list = self.monitor_para['list']
         meas_name += f"Aquire: [{', '.join([i.name for i in para_list])}]"
 
@@ -124,46 +169,111 @@ class QMeasure:
         if bwd:
             meas_list.append(self._db_new_measure(bwd=bwd, scan_direction='down'))
         return meas_list
+                
+                
+    def _set_para(self, p, val):
+        with self.quasi_lock:
+            p(val)
+
+    def _take_data(self):
+        with self.quasi_lock:
+            parameters_to_fetch = self.monitor_para['list']
+            parallel = self.monitor_para['parallel']
+            vals = process_params_meas(parameters_to_fetch, use_threads=True)
+            return vals
+            
+    def _set_scan_status(self, s):
+        with self.quasi_lock:
+            # print('set_scan_status-----------------')
+            # print(s)
+            # if self.station_manager:
+                # self.station_manager.scancurrent_task["status"] = s
+            # print('set scan status in qcmeasure: ', s)
+            # print('set scan status in qcmeasure: ', s)
+            # print('set scan status in qcmeasure: ', s)
+            # print('set scan status in qcmeasure: ', s)
+            self._shared_scan_status = s
+
+    def _get_scan_status(self):
+        with self.quasi_lock:
+            # print('get_scan_status++++++++++++++++++++++-')
+            s = self._shared_scan_status
+            # print(s)
+        return s
+
+    def _pause_resume_para(self, para, action_str="pause"):
+        d = {
+            "pause": ('Ramping', 'Pausing', 'Paused'),
+            "resume": ('Paused', 'Resuming', 'Ramping'),
+            }
+        status_seq = d[action_str]
+        if isinstance(para, Parameter) and para.metadata.get('ramp_status') == status_seq[0]:
+            with self.quasi_lock:
+                para.metadata['ramp_status'] = status_seq[1]
+                while para.metadata['ramp_status'] != status_seq[2]:
+                    time.sleep(0.2)
 
     def _scan1d(self, datasaver, list_x, y):
+
         para_x = self.scan_para['x']['parameter']
         delay_x = self.scan_para['x']['delay']
         para_y = self.scan_para['y']['parameter']
-        
-        for x in self.tqdm_x(list_x):
-            para_x(x)
+            
+        iter_x = self.tqdm_x(list_x)
+        for x in iter_x:
+            self._set_para(para_x, x)
             time.sleep(delay_x)
             vals = self._take_data()
             rslt = [(para_x, x), (para_y, y)] + vals
             datasaver.add_result(*rslt)
+            
+            self._loop_hook(rslt)
+            self.station_manager.add_msg_for_terminal(f'{iter_x._render()}', clear=True)
 
-            if self.is_fwd_now or self.scan_dim==1:
-                self.qclient.add_data([i[1] for i in rslt])
-                self.qclient.update_plot()
+    def _loop_hook(self, qc_rslt):
+        dlist = [i[1] for i in qc_rslt]
+        if self.is_fwd_now or self.scan_dim==1:
+            self.qclient.add_data(dlist)
+            self.qclient.update_plot()
 
-    def _take_data(self):
-        parameters_to_fetch = self.monitor_para['list']
-        parallel = self.monitor_para['parallel']
-        vals = process_params_meas(parameters_to_fetch, use_threads=parallel)
-        return vals
-    
+        self._manage_scan_status()
+
+    def _manage_scan_status(self):
+        if self._get_scan_status() == "Running":
+            return
+        xp = self.scan_para['x']['parameter']
+        yp = self.scan_para['y']['parameter']
+        if self._get_scan_status() == "Stopping":
+            self._pause_resume_para(xp)
+            self._pause_resume_para(yp)
+            self._set_scan_status("Stopped")
+            raise KeyboardInterrupt
+        if self._get_scan_status() == "Pausing":
+            self._pause_resume_para(xp)
+            self._pause_resume_para(yp)
+            self._set_scan_status("Paused")
+            while self._get_scan_status() == "Paused":
+                time.sleep(0.2)
+            return
+        if self._get_scan_status() == "Resuming":
+            self._pause_resume_para(xp, action_str="resume")
+            self._pause_resume_para(yp, action_str="resume")
+            self._set_scan_status("Running")
+            return
+
     def tqdm_x(self, a):
-        if self.scan_dim == 1:
-            # Will show a processbar for x dimension
-            return tqdm(a,leave=False)
-        else:
-            # No processbar for x dimension
-            return a
+        in_thread = self.station_manager is not None
+        if in_thread:
+            return Progress(a, disable=self.scan_dim != 1)
+        return tqdm(a,leave=True, disable=self.scan_dim != 1)
             
     def tqdm_y(self, a):
-        if self.scan_dim == 2:
-            # Will show a processbar for y dimension
-            return tqdm(a,leave=False)
-        else:
-            # No processbar for y dimension
-            return a
-            
-    def _export_dat(self, dat_folder):
+        in_thread = self.station_manager is not None
+        if in_thread:
+            return Progress(a, disable=self.scan_dim != 2)
+        return tqdm(a,leave=True, disable=self.scan_dim != 2)
+     
+    def _export_dat(self, dat_folder=''):
         d2d = Db2Dat()
         for i in self.id_list:
             last_dat_path = d2d.to_dat(qc.config.core.db_location, i, dat_folder,overwrite=True)
@@ -184,13 +294,17 @@ class QMeasure:
         y is the outter loop
         bwd = True means enabling backward scan (2 files will be created)
         '''
+        self._set_scan_status("Running")
+        
         dly_x = self.scan_para['x']['delay']
         para_x = self.scan_para['x']['parameter']
         list_x = self.scan_para['x']['setpoints']
+        xptlen = len(list_x)
 
         dly_y = self.scan_para['y']['delay']
         para_y = self.scan_para['y']['parameter']
         list_y = self.scan_para['y']['setpoints']
+        # yptlen = len(list_y)
 
         # list of Measurement (a qcodes object)
         meas_list = self.db_new_measure(bwd)
@@ -207,7 +321,7 @@ class QMeasure:
             self.to_word(time.strftime(f'\n%m/%d %H:%M'),font_style=['blue','bold'])
             # id, experiment name, sample name
             id_str = ' and '.join([f'#{i}' for i in self.id_list])
-            self.to_word(f'{id_str}. Exp: {self.exp_name}. Sample: {self.sample_name}\n')
+            self.to_word(f'{id_str}. Exp: {self.exp_name}, Sample: {self.sample_name}\n')
             # measurement name
             self.to_word(f'{meas_list[0].name}\n')
             
@@ -216,31 +330,36 @@ class QMeasure:
             ##### start 2d scan  #####
             user_interrrupt = False
             self.is_fwd_now = True
+            # y_counter = 0
             try:
                 # initialize 'z' (not exists) and y0, wait for 1 s
-                t0 = time.time()
+                t0 = time.perf_counter()
                 if para_y:
-                    para_y(list_y[0])
+                    self._set_para(para_y, list_y[0])
                     time.sleep(1)
 
-                for y in self.tqdm_y(list_y):
+                iter_y = self.tqdm_y(list_y)
+                for y in iter_y:
+                    t1 = time.perf_counter()
                     # Initialize y and x0, wait for delay_y seconds
                     if para_y:
-                        para_y(y)
-                    para_x(list_x[0])
+                        self._set_para(para_y, y)
+                    self._set_para(para_x, list_x[0])
                     time.sleep(dly_y)
                     
                     # 1d scan. 2 scans if backward scan is ON
                     # No matter 1 or 2 scans, list_x will keep the same after the for loop
                     for ds in datasaver_list:
 
-                        t1 = time.time()
+                        t2 = time.perf_counter()
                         val_list = self._scan1d(ds, list_x, y)
-                        t2 = time.time()
+                        t3 = time.perf_counter()
 
                         # will run 0 time or twice so values will be unchagned at last
                         if bwd:
                             list_x = list_x[::-1]
+                            
+                            # do something to qclient
                             if self.is_fwd_now and self.scan_dim==1:
                                 qclient_bwd = qtplot_client(self.mute_qclient)
                                 qclient_bwd.init_temporary_file(datasaver_list[1].dataset,list_x,list_y)
@@ -248,15 +367,22 @@ class QMeasure:
                                 # close after update_plot() so temporary file is not occupied
                                 self.qclient.close()
                                 self.qclient = qclient_bwd
-                            self.is_fwd_now = not self.is_fwd_now
 
-                t3 = time.time()
-                time_str = f'{self.to_time_str(t0,t1,t2,t3)}'
-                print(time_str)
+                            self.is_fwd_now = not self.is_fwd_now
+                    # y_counter += 1
+                    t4 = time.perf_counter()
+                    
+                    msg_for_term_y = iter_y._render()
+                    if msg_for_term_y:
+                        self.station_manager.add_msg_for_terminal(f'{msg_for_term_y} {(t3-t2)/xptlen:.3f} s/pt', clear=True)
+
+                time_str = f'\n{self.to_time_str(t0,t2,t3,t4)}\n'
+                self.station_manager.add_msg_for_terminal(time_str)
                 self.to_word(f'{time_str}\n')
             except KeyboardInterrupt:
                 print('Exit manually')
                 user_interrrupt = True
+                
             ##### end 2d scan  #####
             ########################
 
@@ -264,13 +390,16 @@ class QMeasure:
                 ds.flush_data_to_database()
 
             if self.export_dat:
-                last_dat_path = self._export_dat(dat_folder = f'DAT')
+                last_dat_path = self._export_dat()
                 self.qclient.update_plot(last_dat_path)
 
             self.qclient.close()
 
             if user_interrrupt:
-                sys.exit()
+                # sys.exit()
+                pass
+             
+        self._set_scan_status("Stopped")
                 
     def to_word(self, text, font_style=None):
         try:
@@ -349,13 +478,12 @@ class Db2Dat:
 
 
     def dataset_to_dataframe(self, dataset):
-
         para_names = [i for i in dataset.paramspecs]
         tlevel_para_names_sorted = [i.name for i in dataset._rundescriber.interdeps.top_level_parameters]
         tlevel_para_names_original = [i for i in para_names if i in tlevel_para_names_sorted]
         # w/o providing *tlevel_para_names_original the returned dict will be sorted by name strings
         df_dict = dataset.to_pandas_dataframe_dict(*tlevel_para_names_original)
-        
+
         if self.are_indexes_equal(df_dict):
             # combine multiple dataframes of parameters into one
             df = pd.concat(df_dict.values(), axis='columns')
@@ -397,7 +525,7 @@ class Db2Dat:
         meta_string += '\n'
         return meta_string
 
-    def export_setting_file(self, dataset,folder='',overwrite=False):
+    def export_setting_file(self, dataset, folder='',overwrite=False):
         dat_path = self.get_dat_filename(dataset)
         settings_str = f'''\
 Filename: {dat_path}
@@ -460,7 +588,12 @@ Timestamp: {dataset.run_timestamp()}
 
 
     def to_dat(self, db_path, exp_id, dat_folder='',overwrite=False, quiet=False):
-        initialise_or_create_database_at(db_path)
+        p = Path(db_path)
+        if not dat_folder:
+            dat_folder = p.parent / f'{p.stem}_DAT'
+        if not dat_folder.exists():
+            dat_folder.mkdir(parents=True)
+        initialise_or_create_database_at(p)
         dataset = qc.load_by_id(exp_id)
         dat_path = self.export_dat_file(dataset,dat_folder,'',overwrite)
         self.export_setting_file(dataset,dat_folder,overwrite)
