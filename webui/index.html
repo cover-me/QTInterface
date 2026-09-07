@@ -1,0 +1,249 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="description" content="Quantum Transport interface — QCoDeS measurement UI">
+    <title>Quantum Transport Interface</title>
+    <!-- Styles -->
+    <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+    <div class="container">
+        <!-- ============================================================ -->
+        <!-- Top Bar -->
+        <!-- ============================================================ -->
+		<div class="top-bar">
+			<h2><span class="emoji-icon">⚛️</span> <span class="gradient-text">Quantum Transport Interface</span></h2>
+			<div class="header-message-terminal">
+				<div id="headerLogOutput" class="terminal-content">
+					<span class="log-info"></span>
+				</div>
+			</div>
+		</div>
+		
+		<div class="three-col-layout">
+			<div class="col-panel">
+				<!-- ============================================================ -->
+				<!-- Storage -->
+				<!-- ============================================================ -->
+				<div class="card">
+					<div class="card-header">
+						<h3>📂 Storage</h3>
+						<div class="card-header-actions">
+							<button class="btn-secondary btn-sm" onclick="getStorageConf()" title="Read">🔍</button>
+							<button class="btn-secondary btn-sm" onclick="setStorageConf()" title="Write">✏️</button>
+						</div>
+					</div>
+					<div class="meta-form-row">
+						<div class="meta-form-item">
+							<label>Work Directory</label>
+							<input type="text" id="dataDirInput" oninput=" markStorageModified(this);">
+						</div>
+						<div class="meta-form-item">
+							<label>User</label>
+							<input type="text" id="userInput" oninput=" markStorageModified(this);">
+						</div>
+						<div class="meta-form-item">
+							<label>Experiment Name</label>
+							<input type="text" id="expName" oninput=" markStorageModified(this);">
+						</div>
+						<div class="meta-form-item">
+							<label>Fridge</label>
+							<input type="text" id="fridgeInput" oninput=" markStorageModified(this);">
+						</div>
+					</div>
+					<div class="path-display">
+						<div class="form-item">
+							<label>Data Storage Path</label>
+							<input type="text" id="calculatedDataPath" readonly value="Not specified">
+						</div>
+					</div>
+				</div>
+				<!-- ============================================================ -->
+				<!-- Chip Information -->
+				<!-- ============================================================ -->
+				<div class="card">
+					<div class="card-header">
+						<h3>🔲 Chip Information</h3>
+						<div class="card-header-actions">
+							<button class="btn-secondary btn-sm" onclick="getChipCards()" title="Read">🔍</button>
+							<button id="set_chip_info" class="btn-secondary btn-sm" onclick="setChipCards()" title="Write">✏️</button>
+							<button class="btn-secondary btn-sm" onclick="addNewChipCard()" title="Add a new chip">➕</button>
+						</div>
+					</div>
+					<div id="chipCardContainer">
+						<div id="noChipTip">
+							No chips added yet. Click above to add.
+						</div>
+					</div>
+				</div>
+			</div>
+			<div class="col-panel">
+				<!-- ============================================================ -->
+				<!-- Instruments -->
+				<!-- ============================================================ -->
+				<div class="card">
+					<div class="card-header">
+						<h3>📻️ Instruments</h3>
+						<div class="card-header-actions">
+							<button class="btn-secondary btn-sm" onclick="getStationInstruments()" title="Read all">🔍</button>
+							<button class="btn-secondary btn-sm" onclick="addInstrument()" title="Add an instrument">
+								➕
+							</button>
+							<button id="toggleAllBtn" class="btn btn-secondary btn-lg" onclick="toggleAllInstruments()" title="Toggle all instrument cards">Toggle</button>
+							<button class="btn-secondary btn-lg" disabled onclick="triggerImportConfig()" title="Load configure file">
+								Load
+							</button>
+							<button class="btn-secondary btn-lg" disabled onclick="exportConfigFile()" title="Export configure file">
+								Export
+							</button>
+							<input type="file"
+								   id="configFileInput"
+								   style="display:none;"
+								   accept=".json,.yaml,.yml"
+								   onchange="handleImportConfig(event)">
+						</div>
+					</div>
+					<div id="instErrorBox" class="error-msg"></div>
+					<div id="instrumentGrid" class="instrument-grid"></div>
+				</div>
+			</div>
+			<div class="col-panel">
+				<!-- ============================================================ -->
+				<!-- Parameters -->
+				<!-- ============================================================ -->
+				<div class="card">
+					<div class="card-header">
+						<h3>🎚️ Parameters</h3>
+						<div class="card-header-actions">
+							<button class="btn-secondary btn-sm" onclick="fetchParametersJson()" title="Read all">🔍</button>
+						</div>
+					</div>
+					<!-- Unified Parameters Table -->
+					<div class="table-wrapper">
+						<table class="dedicated-table">
+							<tbody id="unifiedParametersTableBody">
+							</tbody>
+						</table>
+					</div>
+				</div>
+				<!-- ============================================================ -->
+				<!-- 2D Scan Configuration -->
+				<!-- ============================================================ -->
+				<div class="card">
+					<div class="card-header">
+						<h3>📊 Scan</h3>
+						<span id="scanStatusText" class="status-badge idle">Idle</span>
+					</div>
+					<div class="scan-config-row">
+						<div class="scan-col-group">
+							<!-- X‑Axis Scan -->
+							<div class="cell-row-single">
+								<div class="form-item scan-form-item-flex-3">
+									<label>X parameter</label>
+									<select id="xScanSelect" class="table-input table-input-scan">
+										<option value="">None (index)</option>
+									</select>
+								</div>
+								<div class="form-item scan-form-item-flex-1">
+									<label>Start</label>
+									<input type="number" id="xStart" step="any">
+								</div>
+								<div class="form-item scan-form-item-flex-1">
+									<label>Stop</label>
+									<input type="number" id="xStop" step="any">
+								</div>
+								<div class="form-item scan-form-item-flex-1-sm">
+									<label>Points</label>
+									<input type="number" id="xPoints" min="2">
+								</div>
+								<div class="form-item scan-form-item-flex-1-sm">
+									<label>Delay (s)</label>
+									<input type="number" id="xDelay" step=".001">
+								</div>
+							</div>
+							<!-- Y‑Axis Scan -->
+							<div class="cell-row-single">
+								<div class="form-item scan-form-item-flex-3">
+									<label>Y parameter</label>
+									<select id="yScanSelect" class="table-input table-input-scan">
+										<option value="">None (index)</option>
+									</select>
+								</div>
+								<div class="form-item scan-form-item-flex-1">
+									<label>Start</label>
+									<input type="number" id="yStart" step="any">
+								</div>
+								<div class="form-item scan-form-item-flex-1">
+									<label>Stop</label>
+									<input type="number" id="yStop" step="any">
+								</div>
+								<div class="form-item scan-form-item-flex-1-sm">
+									<label>Points</label>
+									<input type="number" id="yPoints" min="2">
+								</div>
+								<div class="form-item scan-form-item-flex-1-sm">
+									<label>Delay (s)</label>
+									<input type="number" id="yDelay" step=".001">
+								</div>
+							</div>
+						</div>
+						<div class="scan-checkbox-panel">
+							<div style="height:16px"></div>
+							<label class="checkbox-label">
+								<input type="checkbox" id="scanBwd">
+								Backward
+							</label>
+							<label class="checkbox-label">
+								<input type="checkbox" id="scanCts">
+								Continuous
+							</label>
+							<button id="addScanToQueueBtn" class="btn-secondary btn-sm" style="width:50px;align-self:flex-end;" title="Add current scan to queue" onclick="addCurrentToQueue()">
+								➕
+							</button>
+						</div>
+					</div>
+					<div class="scan-queue-wrapper">
+						<label class="scan-queue-label">Queue</label>
+						<div class="table-wrapper" style="margin-top:3px;">
+							<table class="dedicated-table">
+								<tbody id="scanQueueTableBody">
+									<tr>
+										<td colspan="6">
+											No scan tasks in queue
+										</td>
+									</tr>
+								</tbody>
+							</table>
+						</div>
+						<div class="scan-btn-row">
+							<button class="btn-success btn-lg" id="startQueueBtn" onclick="startQueueExecution()">
+								▶ Add and run
+							</button>
+							<button id="pauseResumeToggleBtn" class="btn-secondary btn-lg">⏸ Pause</button>
+							<button class="btn-success btn-lg" id="resumeQueueBtn" onclick="resumeQueueExecution()" style="display:none;">
+								▶ Resume
+							</button>
+							<button class="btn-danger btn-lg" id="stopQueueBtn" onclick="stopQueueExecution()" disabled>
+								⏹ Stop
+							</button>
+						</div>
+					</div>
+				</div>
+			</div>
+			
+		</div>
+	</div>
+    <!-- ============================================================ -->
+    <!-- Image Modal -->
+    <!-- ============================================================ -->
+    <div id="imageModal" class="image-modal" onclick="closeImageModal()">
+        <span class="image-modal-close" onclick="closeImageModal()">&times;</span>
+        <img class="image-modal-content" id="modalImage" alt="">
+        <div class="image-modal-caption" id="modalCaption"></div>
+    </div>
+    <!-- Scripts -->
+    <script src="script.js"></script>
+</body>
+</html>

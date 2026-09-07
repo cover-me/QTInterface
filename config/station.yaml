@@ -1,0 +1,38 @@
+instruments:
+  vs1:
+    driver: drivers.dummy_voltage_source.DummyVoltageSource
+    address: USB::DUMMY::INSTR
+  vs2:
+    driver: drivers.dummy_voltage_source.DummyVoltageSource
+    address: TCPIP::192.168.1.DUMMY
+  magnet:
+    driver: drivers.dummy_magnet.DummyMagnet
+    address: TCPIP::192.168.DUMMY.13
+  scaler:
+    driver: drivers.scaler.Scaler
+    address:
+  affine_trans:
+    driver: drivers.affine_transformer.AffineTransformer
+    address:
+
+parameters:
+  vg:
+    source: vs1.voltage
+    acquire_in_scan: true
+  vg2:
+    source: vs2.voltage
+    acquire_in_scan: true
+  vg3:
+    source: scaler.scaled_value
+    acquire_in_scan: false
+    
+storage:
+  fridge: FridgeX
+  exp_name: 2026-08_2DEG_2
+  user: XiaoMing
+  data_dir: D:\LabData
+
+chips:
+  - id: chip_1000000000000
+    name: 2026-07_InAs_QW_24
+    images: []
